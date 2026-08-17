@@ -1,12 +1,9 @@
 {
+  "name": "bibata-caelestia-cursor",
+  "version": "1.0.0",
   "type": "module",
-  "dependencies": {
-    "cbmp": "^1.1.1"
-  },
   "scripts": {
-    "clean": "rm -rf bin bitmaps themes",
-    "render": "npx cbmp render.json",
     "build": "bash build.sh",
-    "generate": "npx cbmp render.json && bash build.sh"
+    "install": "bash install.sh"
   }
 }
