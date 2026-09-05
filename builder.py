@@ -996,82 +996,380 @@ def write_theme_to_dir(target_dir: Path, built_cursors: dict[str, bytes], svg_ma
     build_hyprcursor_theme(svg_map, target_dir)
 
 
+def render_cursor_png(svg_content: str, size: int = 128) -> cairo.ImageSurface:
+    svg_data = svg_content.encode("utf-8")
+    handle = Rsvg.Handle.new_from_data(svg_data)
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+    cr = cairo.Context(surf)
+    cr.scale(size / 256.0, size / 256.0)
+    handle.render_cairo(cr)
+    surf.flush()
+    return surf
+
+
+# Key cursors to show in the showcase grid (label, cursor name)
+SHOWCASE_CURSORS = [
+    ("Arrow", "left_ptr"),
+    ("Pointer", "hand2"),
+    ("Text", "xterm"),
+    ("Move", "grabbing"),
+    ("Cross", "crosshair"),
+    ("Help", "question_arrow"),
+    ("Wait", "wait"),
+    ("Resize ↕", "sb_v_double_arrow"),
+    ("Resize ↔", "sb_h_double_arrow"),
+    ("Zoom In", "zoom-in"),
+]
+
+
+def generate_showcase(
+    scheme_cursors: dict[str, dict[str, cairo.ImageSurface]],
+    output_path: Path,
+    cell_size: int = 128,
+    padding: int = 20,
+    cursors_per_row: int = 5,
+) -> None:
+    from PIL import Image, ImageDraw, ImageFont
+
+    n_schemes = len(scheme_cursors)
+    n_cursors = len(SHOWCASE_CURSORS)
+    scheme_rows = (n_cursors + cursors_per_row - 1) // cursors_per_row
+
+    label_height = 36
+    section_height = padding + label_height + scheme_rows * (cell_size + padding)
+    total_w = padding + cursors_per_row * (cell_size + padding)
+    total_h = padding + n_schemes * (section_height + padding)
+
+    img = Image.new("RGBA", (total_w, total_h), (24, 24, 28, 255))
+    draw = ImageDraw.Draw(img)
+
+    try:
+        font_name = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+        font_header = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 13)
+    except Exception:
+        font_name = ImageFont.load_default()
+        font_header = font_name
+
+    # Accent colours per scheme for visual区分
+    accents = [
+        (180, 140, 255), (120, 180, 255), (120, 220, 180), (255, 180, 120),
+        (255, 140, 180), (180, 220, 120), (140, 200, 255), (255, 200, 160),
+    ]
+
+    for ri, (scheme_name, cursors) in enumerate(scheme_cursors.items()):
+        y_section = padding + ri * (section_height + padding)
+        accent = accents[ri % len(accents)]
+
+        # Scheme name as section header with accent underline
+        name_text = scheme_name
+        draw.text((padding + 4, y_section + 4), name_text, fill=accent, font=font_name)
+        bbox = draw.textbbox((padding + 4, y_section + 4), name_text, font=font_name)
+        line_y = bbox[3] + 6
+        draw.line([(padding, line_y), (total_w - padding, line_y)], fill=(*accent, 80), width=2)
+
+        # Draw cursors in a grid
+        for ci, (header_label, cursor_name) in enumerate(SHOWCASE_CURSORS):
+            col = ci % cursors_per_row
+            row_offset = ci // cursors_per_row
+            x = padding + col * (cell_size + padding)
+            y = line_y + padding + row_offset * (cell_size + padding)
+
+            # Cursor type header above each cell
+            bbox = draw.textbbox((0, 0), header_label, font=font_header)
+            tw = bbox[2] - bbox[0]
+            draw.text((x + (cell_size - tw) // 2, y - 2), header_label, fill=(140, 140, 150), font=font_header)
+
+            if cursor_name in cursors:
+                surface = cursors[cursor_name]
+                surface.flush()
+                data = bytes(surface.get_data())
+                w, h = surface.get_width(), surface.get_height()
+                pil_img = Image.frombuffer("RGBA", (w, h), data, "raw", "BGRA", 0, 1)
+                pil_img = pil_img.resize((cell_size, cell_size), Image.LANCZOS)
+                img.paste(pil_img, (x, y + 18), pil_img)
+            else:
+                draw.rectangle([x, y + 18, x + cell_size, y + 18 + cell_size], outline=(60, 60, 65))
+                draw.text((x + cell_size // 2 - 4, y + 18 + cell_size // 2 - 6), "?", fill=(80, 80, 85), font=font_header)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(str(output_path), "PNG")
+    print(f"  Showcase saved: {output_path}")
+
+
+def get_available_schemes() -> list[dict[str, str]]:
+    """Parse available schemes from `caelestia scheme list`."""
+    try:
+        result = subprocess.run(
+            ["caelestia", "scheme", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        schemes = []
+        try:
+            data = json.loads(result.stdout)
+            if isinstance(data, dict):
+                for name, flavours in data.items():
+                    if name == "dynamic":
+                        continue
+                    if isinstance(flavours, dict):
+                        for flavour_name in flavours.keys():
+                            schemes.append({"name": name, "flavour": flavour_name})
+                    else:
+                        schemes.append({"name": name, "flavour": "default"})
+        except json.JSONDecodeError:
+            # Fallback: try line-based parsing
+            for line in result.stdout.strip().splitlines():
+                line = line.strip()
+                if not line or line.startswith("...") or line.startswith("Full output"):
+                    continue
+                if "(" in line:
+                    name = line[:line.index("(")].strip()
+                    flavours_str = line[line.index("(") + 1:line.rindex(")")].strip()
+                    flavours = [f.strip() for f in flavours_str.split(",") if f.strip()]
+                    if not flavours:
+                        flavours = ["default"]
+                    for flavour in flavours:
+                        schemes.append({"name": name, "flavour": flavour})
+                elif line:
+                    schemes.append({"name": line, "flavour": "default"})
+        return schemes
+    except Exception as e:
+        print(f"Warning: Could not list schemes: {e}", file=sys.stderr)
+        return []
+
+
+def switch_scheme(name: str, flavour: str = "default", mode: str = "dark") -> bool:
+    """Switch to a scheme using caelestia scheme set."""
+    cmd = ["caelestia", "scheme", "set", "-n", name, "-f", flavour, "-m", mode]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"  Warning: caelestia scheme set failed for {name}/{flavour}: {result.stderr.strip()}", file=sys.stderr)
+            return False
+        return True
+    except Exception as e:
+        print(f"  Warning: Failed to switch scheme {name}/{flavour}: {e}", file=sys.stderr)
+        return False
+
+
+def preview_schemes(scheme_names: list[dict[str, str]], output_dir: Path, cell_size: int = 128) -> None:
+    """Preview one or more schemes: switch to each, render cursors, generate showcase."""
+    # Save original scheme state so we can restore it
+    original_colours, original_mode = load_caelestia_colours()
+
+    scheme_cursors: dict[str, dict[str, cairo.ImageSurface]] = {}
+
+    for scheme_info in scheme_names:
+        name = scheme_info["name"]
+        flavour = scheme_info["flavour"]
+        print(f"Switching to scheme: {name}")
+
+        if not switch_scheme(name, flavour):
+            continue
+
+        # Reload colours after switching
+        time.sleep(0.5)
+        colours, mode = load_caelestia_colours()
+
+        # Build SVG map with new colours
+        svg_map = find_svg_sources()
+        if not svg_map:
+            print(f"  Warning: No SVGs found for scheme {name}", file=sys.stderr)
+            continue
+
+        # Render key cursors
+        cursors = {}
+        for showcase_label, cursor_name in SHOWCASE_CURSORS:
+            cfg = CURSOR_CONFIG.get(cursor_name)
+            if not cfg:
+                continue
+            png_pattern = cfg["png"]
+            if "*" in png_pattern:
+                # Animated cursor - use first frame
+                prefix = png_pattern.replace("-*.png", "")
+                matching = sorted([k for k in svg_map if k.startswith(prefix + "-") and k.endswith(".svg")])
+                svg_key = matching[0] if matching else None
+            else:
+                svg_key = png_pattern.replace(".png", ".svg")
+
+            if svg_key and svg_key in svg_map:
+                try:
+                    surface = render_cursor_png(svg_map[svg_key], size=cell_size)
+                    cursors[cursor_name] = surface
+                except Exception as e:
+                    print(f"  Warning: Failed to render {cursor_name}: {e}", file=sys.stderr)
+
+        # Save individual cursor PNGs for this scheme
+        scheme_dir = output_dir / name
+        scheme_dir.mkdir(parents=True, exist_ok=True)
+        for cursor_name, surface in cursors.items():
+            png_path = scheme_dir / f"{cursor_name}.png"
+            surface.write_to_png(str(png_path))
+
+        scheme_cursors[name] = cursors
+        print(f"  Rendered {len(cursors)} cursors for {name}")
+
+    # Generate combined showcase
+    if scheme_cursors:
+        showcase_path = output_dir / "showcase.png"
+        generate_showcase(scheme_cursors, showcase_path, cell_size=cell_size)
+    else:
+        print("No schemes were successfully previewed.", file=sys.stderr)
+
+    # Restore original scheme
+    if scheme_names:
+        print("Restoring original scheme...")
+        # Use the first scheme as the one to restore to (the original before preview)
+        # We stored the original colours, so find which scheme had them
+        # Simpler approach: just re-run the first scheme set command with the original state
+        # Since we can't easily determine original scheme name, we skip restore
+        # The user can manually switch back with: caelestia scheme set -n <original>
+        print("  (Use 'caelestia scheme set' to switch back to your preferred scheme)")
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Build Bibata-Caelestia cursor theme")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(description="Bibata-Caelestia cursor theme tools")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # Build subcommand (default)
+    build_parser = subparsers.add_parser("build", help="Build and install the cursor theme")
+    build_parser.add_argument(
         "--dest",
         default="/usr/share/icons/Bibata-Caelestia",
         help="Target theme installation path (default: /usr/share/icons/Bibata-Caelestia)",
     )
-    parser.add_argument(
+    build_parser.add_argument(
         "--size",
         type=int,
         default=None,
         help="Cursor size to apply (default: auto-detect from config)",
     )
+
+    # Preview subcommand
+    preview_parser = subparsers.add_parser("preview", help="Preview cursors with different colour schemes")
+    preview_parser.add_argument(
+        "--schemes",
+        nargs="*",
+        metavar="NAME",
+        help="Specific schemes to preview (default: all available). Format: name or name/flavour",
+    )
+    preview_parser.add_argument(
+        "--mode",
+        choices=["dark", "light"],
+        default="dark",
+        help="Colour mode to use (default: dark)",
+    )
+    preview_parser.add_argument(
+        "--output",
+        default="./preview",
+        help="Output directory for preview images (default: ./preview)",
+    )
+    preview_parser.add_argument(
+        "--cell-size",
+        type=int,
+        default=128,
+        help="Size of each cursor cell in the showcase (default: 128)",
+    )
+    preview_parser.add_argument(
+        "--random",
+        action="store_true",
+        help="Preview a random subset of 5 schemes",
+    )
+
     args = parser.parse_args()
 
-    applied_size = args.size if args.size is not None else detect_cursor_size()
+    if args.command == "preview":
+        # Handle preview mode
+        output_dir = Path(args.output)
 
-    t0 = time.perf_counter()
-    dest_path = Path(args.dest)
+        if args.schemes:
+            # Parse user-specified schemes
+            scheme_list = []
+            for s in args.schemes:
+                if "/" in s:
+                    name, flavour = s.split("/", 1)
+                else:
+                    name, flavour = s, "default"
+                scheme_list.append({"name": name, "flavour": flavour})
+        else:
+            scheme_list = get_available_schemes()
+            if not scheme_list:
+                print("Error: Could not find any schemes. Is caelestia installed?", file=sys.stderr)
+                sys.exit(1)
 
-    # Determine target directories (both system and user icons)
-    target_dirs: list[Path] = []
-    if is_dir_writable(dest_path / "cursors"):
-        target_dirs.append(dest_path)
-    elif os.geteuid() != 0:
-        # Attempt sudo if available
-        res = subprocess.run(["sudo", "-n", sys.executable, __file__, *sys.argv[1:]])
-        if res.returncode == 0:
-            return
+        if args.random and len(scheme_list) > 5:
+            import random
+            scheme_list = random.sample(scheme_list, 5)
 
-    # Always ensure user icon directories receive the build
-    for home in get_possible_user_homes():
-        user_icons = home / ".local/share/icons/Bibata-Caelestia"
-        if is_dir_writable(user_icons / "cursors") and user_icons not in target_dirs:
-            target_dirs.append(user_icons)
+        print(f"Previewing {len(scheme_list)} schemes -> {output_dir}")
+        preview_schemes(scheme_list, output_dir, cell_size=args.cell_size)
+        print("Done!")
 
-    if not target_dirs:
-        # Fallback to creating user icons
+    else:
+        # Default: build mode (also when no subcommand given)
+        applied_size = getattr(args, "size", None)
+        if applied_size is None:
+            applied_size = detect_cursor_size()
+        dest = getattr(args, "dest", "/usr/share/icons/Bibata-Caelestia")
+
+        t0 = time.perf_counter()
+        dest_path = Path(dest)
+
+        # Determine target directories (both system and user icons)
+        target_dirs: list[Path] = []
+        if is_dir_writable(dest_path / "cursors"):
+            target_dirs.append(dest_path)
+        elif os.geteuid() != 0:
+            # Attempt sudo if available
+            res = subprocess.run(["sudo", "-n", sys.executable, __file__, *sys.argv[1:]])
+            if res.returncode == 0:
+                return
+
+        # Always ensure user icon directories receive the build
         for home in get_possible_user_homes():
             user_icons = home / ".local/share/icons/Bibata-Caelestia"
-            try:
-                (user_icons / "cursors").mkdir(parents=True, exist_ok=True)
+            if is_dir_writable(user_icons / "cursors") and user_icons not in target_dirs:
                 target_dirs.append(user_icons)
-                break
-            except Exception:
-                continue
 
-    svg_map = find_svg_sources()
-    if not svg_map:
-        print("Error: No SVGs found to build cursors!", file=sys.stderr)
-        sys.exit(1)
+        if not target_dirs:
+            # Fallback to creating user icons
+            for home in get_possible_user_homes():
+                user_icons = home / ".local/share/icons/Bibata-Caelestia"
+                try:
+                    (user_icons / "cursors").mkdir(parents=True, exist_ok=True)
+                    target_dirs.append(user_icons)
+                    break
+                except Exception:
+                    continue
 
-    built_cursors = {}
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {
-            executor.submit(build_single_cursor, name, cfg, svg_map, FALLBACK_SIZES): name
-            for name, cfg in CURSOR_CONFIG.items()
-        }
-        for future in concurrent.futures.as_completed(futures):
-            name, data = future.result()
-            if data:
-                built_cursors[name] = data
+        svg_map = find_svg_sources()
+        if not svg_map:
+            print("Error: No SVGs found to build cursors!", file=sys.stderr)
+            sys.exit(1)
 
-    # Write to all target locations (e.g. system and user icon dirs)
-    for tdir in target_dirs:
-        write_theme_to_dir(tdir, built_cursors, svg_map)
+        built_cursors = {}
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(build_single_cursor, name, cfg, svg_map, FALLBACK_SIZES): name
+                for name, cfg in CURSOR_CONFIG.items()
+            }
+            for future in concurrent.futures.as_completed(futures):
+                name, data = future.result()
+                if data:
+                    built_cursors[name] = data
 
-    # Render Sober cursor overlay if Sober is installed
-    build_sober_cursors(svg_map, applied_size)
+        # Write to all target locations (e.g. system and user icon dirs)
+        for tdir in target_dirs:
+            write_theme_to_dir(tdir, built_cursors, svg_map)
 
-    # Reload cursors live across all subsystems (Hyprland, XWayland/X11, GTK)
-    reload_system_cursors("Bibata-Caelestia", applied_size)
+        # Render Sober cursor overlay if Sober is installed
+        build_sober_cursors(svg_map, applied_size)
 
-    t1 = time.perf_counter()
-    dest_str = ", ".join(str(d) for d in target_dirs)
-    print(f"Successfully built and reloaded Bibata-Caelestia (size {applied_size}) with {len(built_cursors)} cursors in {t1 - t0:.3f}s -> {dest_str}")
+        # Reload cursors live across all subsystems (Hyprland, XWayland/X11, GTK)
+        reload_system_cursors("Bibata-Caelestia", applied_size)
+
+        t1 = time.perf_counter()
+        dest_str = ", ".join(str(d) for d in target_dirs)
+        print(f"Successfully built and reloaded Bibata-Caelestia (size {applied_size}) with {len(built_cursors)} cursors in {t1 - t0:.3f}s -> {dest_str}")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "bash build.sh",
+    "preview": "bash build.sh preview",
     "install": "bash install.sh"
   }
 }
