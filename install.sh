@@ -127,9 +127,9 @@ EOF
 
 echo "==> [6/6] Building cursors and applying size ${CURSOR_SIZE}px..."
 if [ "$EUID" -eq 0 ]; then
-    "${SYS_BIN}" --size "${CURSOR_SIZE}" --dest "/usr/share/icons/Bibata-Caelestia"
+    "${SYS_BIN}" build --size "${CURSOR_SIZE}" --dest "/usr/share/icons/Bibata-Caelestia"
 else
-    sudo "${SYS_BIN}" --size "${CURSOR_SIZE}" --dest "/usr/share/icons/Bibata-Caelestia"
+    sudo "${SYS_BIN}" build --size "${CURSOR_SIZE}" --dest "/usr/share/icons/Bibata-Caelestia"
 fi
 
 echo "==> Installation complete! Bibata-Caelestia is ready."
